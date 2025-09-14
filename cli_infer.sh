@@ -1,5 +1,5 @@
 #!/bin/bash
-MODEL_PATH="results/qwen/merge-96/test"
+MODEL_PATH="results/qwen/merge/test"
 TP_SIZE=2
 MAX_SEQS=512
 
