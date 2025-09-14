@@ -121,6 +121,7 @@ It supports **thinking mode** (`<think>...</think>` blocks) and allows users to 
 
 
 ### ⚙️ Usage
+If you want to run `cli_infer.sh` directly, please place the model downloaded from Google Drive into `"results/qwen"`, and assign the corresponding directory path to MODEL_PATH in `cli_infer.sh`.
 #### 1. Run with Shell Script.
 ```bash
 bash cli_infer.sh
