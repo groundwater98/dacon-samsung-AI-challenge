@@ -18,7 +18,7 @@ The key idea is to **merge functionally similar experts** by analyzing their out
    ```
   - https://github.com/EleutherAI/lm-evaluation-harness.git
 
-* **Step 3: Install C4 datasets (calibration datasets). **
+* **Step 3: Install C4 datasets (calibration datasets).**
    ```bash
    wget https://huggingface.co/datasets/allenai/c4/resolve/main/en/c4-train.00000-of-01024.json.gz -P dacon_lmls/data/
    ```
