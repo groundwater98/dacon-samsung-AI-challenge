@@ -25,10 +25,6 @@ The key idea is to **merge functionally similar experts** by analyzing their out
    ```bash
    gunzip -k dacon_lmls/data/c4-train.00000-of-01024.json.gz
    ```
-*  **Step 4: Run Serving Example.**
-   ```bash
-   python ...
-   ```
 
 ## 📝 Instructions
 ### 1. Merging Process

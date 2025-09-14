@@ -13,9 +13,9 @@ accelerate launch --config_file static/finetune_config.yaml \
   --cluster="hierarchical" \
   --linkage="average" \
   --merge="freq" \
-  --num_average_groups=80 \
-  --n_sentences=128 \
+  --num_average_groups=96 \
+  --n_sentences=64 \
   --train_batch_size=4 \
   --eval_batch_size=16 \
   --result_path="results/results_qwen30BA3B.txt" \
-  --output_path="results/qwen/merge/test" |& tee results/log_test
+  --output_path="results/qwen/merge-96/test" |& tee results/log_test

@@ -1,3 +1,4 @@
+import copy
 import os
 import pickle
 import time
@@ -349,40 +350,97 @@ class ExpertsGrouperForQwen3MoE(object):
                         self.save_similarity(ffn_name, i, j, similarity)
                         self.save_similarity(ffn_name, j, i, similarity)
 
+# @torch.no_grad()
+# def _merge_mlp_experts_by_usage_frequency_weighting(
+#         ffn: Qwen3MoeSparseMoeBlock,
+#         group_labels: torch.LongTensor,
+#         usage_frequencies: torch.Tensor,
+# ) -> Qwen3MoeSparseMoeBlock:
+#     for label in group_labels.unique():
+#         expert_indices = torch.where(group_labels == label)[0]
+#         gate_proj_weight_list = torch.stack(
+#             [ffn.experts[expert_idx].gate_proj.weight * usage_frequencies[expert_idx]
+#              for expert_idx in expert_indices], dim=0
+#         )
+#         down_proj_weight_list = torch.stack(
+#             [ffn.experts[expert_idx].down_proj.weight * usage_frequencies[expert_idx]
+#              for expert_idx in expert_indices], dim=0
+#         )
+#         up_proj_weight_list = torch.stack(
+#             [ffn.experts[expert_idx].up_proj.weight * usage_frequencies[expert_idx]
+#              for expert_idx in expert_indices], dim=0
+#         )
+#         gate_proj_weight = torch.sum(gate_proj_weight_list, dim=0) / (torch.sum(usage_frequencies[expert_indices], dim=0) + FP32_EPS)
+#         down_proj_weight = torch.sum(down_proj_weight_list, dim=0) / (torch.sum(usage_frequencies[expert_indices], dim=0) + FP32_EPS)
+#         up_proj_weight = torch.sum(up_proj_weight_list, dim=0) / (torch.sum(usage_frequencies[expert_indices], dim=0) + FP32_EPS)
+
+#         ffn.experts[expert_indices[0]].gate_proj.weight.copy_(gate_proj_weight)
+#         ffn.experts[expert_indices[0]].down_proj.weight.copy_(down_proj_weight)
+#         ffn.experts[expert_indices[0]].up_proj.weight.copy_(up_proj_weight)
+
+#         for expert_idx in expert_indices[1:]:
+#             # Binding merged experts to the first of them
+#             ffn.experts[expert_idx] = ffn.experts[expert_indices[0]]
+
+#     return ffn
+
+
 @torch.no_grad()
 def _merge_mlp_experts_by_usage_frequency_weighting(
-        ffn: Qwen3MoeSparseMoeBlock,
+        ffn,  # Qwen3MoeSparseMoeBlock
         group_labels: torch.LongTensor,
         usage_frequencies: torch.Tensor,
-) -> Qwen3MoeSparseMoeBlock:
+):
+    new_experts = torch.nn.ModuleList()
+    new_gate_weights = []
+
+    device = ffn.gate.weight.device
+    dtype = ffn.gate.weight.dtype
+
     for label in group_labels.unique():
         expert_indices = torch.where(group_labels == label)[0]
+
+        # === Experts: frequency-weighted 평균 ===
         gate_proj_weight_list = torch.stack(
-            [ffn.experts[expert_idx].gate_proj.weight * usage_frequencies[expert_idx]
-             for expert_idx in expert_indices], dim=0
+            [ffn.experts[idx].gate_proj.weight * usage_frequencies[idx]
+             for idx in expert_indices], dim=0
         )
         down_proj_weight_list = torch.stack(
-            [ffn.experts[expert_idx].down_proj.weight * usage_frequencies[expert_idx]
-             for expert_idx in expert_indices], dim=0
+            [ffn.experts[idx].down_proj.weight * usage_frequencies[idx]
+             for idx in expert_indices], dim=0
         )
         up_proj_weight_list = torch.stack(
-            [ffn.experts[expert_idx].up_proj.weight * usage_frequencies[expert_idx]
-             for expert_idx in expert_indices], dim=0
+            [ffn.experts[idx].up_proj.weight * usage_frequencies[idx]
+             for idx in expert_indices], dim=0
         )
-        gate_proj_weight = torch.sum(gate_proj_weight_list, dim=0) / (torch.sum(usage_frequencies[expert_indices], dim=0) + FP32_EPS)
-        down_proj_weight = torch.sum(down_proj_weight_list, dim=0) / (torch.sum(usage_frequencies[expert_indices], dim=0) + FP32_EPS)
-        up_proj_weight = torch.sum(up_proj_weight_list, dim=0) / (torch.sum(usage_frequencies[expert_indices], dim=0) + FP32_EPS)
 
-        ffn.experts[expert_indices[0]].gate_proj.weight.copy_(gate_proj_weight)
-        ffn.experts[expert_indices[0]].down_proj.weight.copy_(down_proj_weight)
-        ffn.experts[expert_indices[0]].up_proj.weight.copy_(up_proj_weight)
+        denom = torch.sum(usage_frequencies[expert_indices]) + FP32_EPS
 
-        for expert_idx in expert_indices[1:]:
-            # Binding merged experts to the first of them
-            ffn.experts[expert_idx] = ffn.experts[expert_indices[0]]
+        gate_proj_weight = torch.sum(gate_proj_weight_list, dim=0) / denom
+        down_proj_weight = torch.sum(down_proj_weight_list, dim=0) / denom
+        up_proj_weight = torch.sum(up_proj_weight_list, dim=0) / denom
+
+        merged_expert = copy.deepcopy(ffn.experts[expert_indices[0]])
+        merged_expert.gate_proj.weight.copy_(gate_proj_weight.to(dtype=dtype, device=device))
+        merged_expert.down_proj.weight.copy_(down_proj_weight.to(dtype=dtype, device=device))
+        merged_expert.up_proj.weight.copy_(up_proj_weight.to(dtype=dtype, device=device))
+
+        new_experts.append(merged_expert)
+
+        rep_idx = expert_indices[torch.argmax(usage_frequencies[expert_indices])]
+        rep_gate_weight = ffn.gate.weight[rep_idx].clone()
+        new_gate_weights.append(rep_gate_weight)
+
+    ffn.experts = new_experts
+
+    in_features = ffn.gate.in_features
+    new_gate = torch.nn.Linear(in_features, len(new_experts), bias=False).to(device=device, dtype=dtype)
+    new_gate.weight.data.copy_(
+        torch.stack(new_gate_weights, dim=0).to(device=device, dtype=dtype)
+    )
+    ffn.gate = new_gate
 
     return ffn
-
 
 @torch.no_grad()
 def merge_by_groups_with_usage_weighted(
@@ -395,7 +453,7 @@ def merge_by_groups_with_usage_weighted(
 
     for layer_idx in tqdm(
             grouper.sparse_layer_indices,
-            desc=f"[HC-SMoE] Merging experts with usage-frequency-weighted averaging..."
+            desc=f"Merging experts with usage-frequency-weighted averaging..."
     ):
         if merging_layers is not None and layer_idx not in merging_layers:
             continue
