@@ -350,41 +350,6 @@ class ExpertsGrouperForQwen3MoE(object):
                         self.save_similarity(ffn_name, i, j, similarity)
                         self.save_similarity(ffn_name, j, i, similarity)
 
-# @torch.no_grad()
-# def _merge_mlp_experts_by_usage_frequency_weighting(
-#         ffn: Qwen3MoeSparseMoeBlock,
-#         group_labels: torch.LongTensor,
-#         usage_frequencies: torch.Tensor,
-# ) -> Qwen3MoeSparseMoeBlock:
-#     for label in group_labels.unique():
-#         expert_indices = torch.where(group_labels == label)[0]
-#         gate_proj_weight_list = torch.stack(
-#             [ffn.experts[expert_idx].gate_proj.weight * usage_frequencies[expert_idx]
-#              for expert_idx in expert_indices], dim=0
-#         )
-#         down_proj_weight_list = torch.stack(
-#             [ffn.experts[expert_idx].down_proj.weight * usage_frequencies[expert_idx]
-#              for expert_idx in expert_indices], dim=0
-#         )
-#         up_proj_weight_list = torch.stack(
-#             [ffn.experts[expert_idx].up_proj.weight * usage_frequencies[expert_idx]
-#              for expert_idx in expert_indices], dim=0
-#         )
-#         gate_proj_weight = torch.sum(gate_proj_weight_list, dim=0) / (torch.sum(usage_frequencies[expert_indices], dim=0) + FP32_EPS)
-#         down_proj_weight = torch.sum(down_proj_weight_list, dim=0) / (torch.sum(usage_frequencies[expert_indices], dim=0) + FP32_EPS)
-#         up_proj_weight = torch.sum(up_proj_weight_list, dim=0) / (torch.sum(usage_frequencies[expert_indices], dim=0) + FP32_EPS)
-
-#         ffn.experts[expert_indices[0]].gate_proj.weight.copy_(gate_proj_weight)
-#         ffn.experts[expert_indices[0]].down_proj.weight.copy_(down_proj_weight)
-#         ffn.experts[expert_indices[0]].up_proj.weight.copy_(up_proj_weight)
-
-#         for expert_idx in expert_indices[1:]:
-#             # Binding merged experts to the first of them
-#             ffn.experts[expert_idx] = ffn.experts[expert_indices[0]]
-
-#     return ffn
-
-
 @torch.no_grad()
 def _merge_mlp_experts_by_usage_frequency_weighting(
         ffn,  # Qwen3MoeSparseMoeBlock
