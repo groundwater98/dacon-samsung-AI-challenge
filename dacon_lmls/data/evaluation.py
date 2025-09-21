@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
+
 import random
 from typing import Callable, Union, List, Optional, Dict
 
