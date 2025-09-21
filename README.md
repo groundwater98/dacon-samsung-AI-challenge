@@ -1,7 +1,9 @@
 # 2025 Samsung AI Challenge Framework
 
 Our method reduces the number of experts in large-scale Sparsely activated Mixture-of-Experts (SMoE) models without retraining.  
-The key idea is to **merge functionally similar experts** by analyzing their output behavior, rather than depending on routing decisions.
+The key idea is to **group experts via hierarchical clustering based on their output representations (expert-output)**, and then **merge each group into a representative expert using usage-frequency–weighted averaging**.  
+After merging, we apply **frequency-based pruning**, where only the top `pruning_ratio` fraction of experts (those with the highest usage frequencies) are retained.  
+This two-step procedure (cluster & merge → prune) compresses the model while preserving the most influential experts.
 
 ## ⚙️ Software Requirements 
 > This code was developed and tested with  <img src="https://pytorch.org/assets/images/logo-icon.svg" alt="PyTorch" width="20" height="20">  PyTorch 2.7.1.
@@ -27,7 +29,7 @@ The key idea is to **merge functionally similar experts** by analyzing their out
    ```
 
 ## 📝 Instructions
-### 1. Merging Process
+### 1. Merging and Pruning Process
 
 1. **Expert Output Collection**  
    - For each expert in the MoE layer, we collect its output representations using a shared set of input samples.  
@@ -44,7 +46,10 @@ The key idea is to **merge functionally similar experts** by analyzing their out
 4. **Expert Merging**  
    - Within each cluster, merge expert weights (e.g., projection matrices) using weighted averaging.  
    - This reduces the total number of experts while maintaining functional diversity.
----
+
+5. **Frequency-based Pruning**  
+   - For each cluster, compute a **group score** as the **maximum usage frequency** among its member experts.  
+   - Retain only the top portion of clusters corresponding to the given `pruning_ratio` (e.g., keep 70% if `pruning_ratio=0.7`) and discard the rest.
 
 ### 2. Running Experiments
 
@@ -59,7 +64,6 @@ You can either:
    bash scripts/qwen/run.sh
    ```
 
----
 ### 3. Output
 
 - **Model & Tokenizer**  
@@ -94,6 +98,9 @@ You can either:
   The merging method for grouped experts.
   - `"freq"`: Frequency-weighted merging.
 
+- **pruning_ratio**  
+  The fraction of experts retained after pruning.
+
 - **num_average_groups**  
   The number of experts to keep per layer after merging.
 
@@ -121,7 +128,6 @@ It supports **thinking mode** (`<think>...</think>` blocks) and allows users to 
 
 
 ### ⚙️ Usage
-If you want to run `cli_infer.sh` directly, please place the model downloaded from Google Drive into `"results/qwen"`, and assign the corresponding directory path to MODEL_PATH in `cli_infer.sh`.
 #### 1. Run with Shell Script.
 ```bash
 bash cli_infer.sh
