@@ -13,8 +13,6 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import Qwen3MoeForCausalLM, Qwen3MoeConfig
 
-from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock, Qwen3MoeMLP
-
 from dacon_lmls.utils.constants import FP32_EPS
 from dacon_lmls.models.qwen.utils import QwenMoEWrapper
 from dacon_lmls.merging.clustering import group_experts_by_clustering
@@ -28,6 +26,8 @@ LEGAL_SIMILARITY_BASES = ["feature", "feature.abs", "weight-feature", "gradient"
                           "router-logits", "router-weight", "router-weight-feature", "random", "no",
                           "expert-output", "weight+expert-output", "router-logits+expert-output", "router-logits+weight+expert-output"]
 
+# Utility to group experts in Qwen3 MoE layers and maintain per-layer state
+# (group assignments, similarity matrices, usage frequencies, and initial centers)
 class ExpertsGrouperForQwen3MoE(object):
     def __init__(
             self,
@@ -176,6 +176,7 @@ class ExpertsGrouperForQwen3MoE(object):
             num_groups: int,
     ):
         if self.similarity_base == "expert-output":
+            # Perform clustering using expert activation as the similarity base
             dom_experts = self.group_experts_by_clustering_output(
                 model=model,
                 dataloader=dataloader,
@@ -184,8 +185,10 @@ class ExpertsGrouperForQwen3MoE(object):
 
         else:
             raise ValueError(f"Unknown similarity base: {self.similarity_base}")
+        # Return representative experts
         return dom_experts
     
+    # Calculates the similarity between experts, groups them, and returns the representative experts
     def group_experts_by_clustering_output(
         self,
         model: Qwen3MoeForCausalLM,
@@ -196,17 +199,21 @@ class ExpertsGrouperForQwen3MoE(object):
         dom_experts = dict()
         forwarded_hidden_states = {}
         handles = []
+
+        # Define forward hook to collect MoE layer input activations
         def _get_activation_hook(name):
             def hook(module, input, output):
                 forwarded_hidden_states[name].append(input[0].detach().cpu().reshape(-1, input[0].shape[-1])) # .cpu()
             return hook
         
+        # Register hooks on each sparse MoE layer to capture activations
         for layer_idx in tqdm(self.sparse_layer_indices, desc=f"[Merging]Registering forward hook..."):
             ffn_name = f"model.layers.{layer_idx}.mlp"
             forwarded_hidden_states[ffn_name] = []
             moe = model.model.layers[layer_idx].mlp
             handles.append(moe.register_forward_hook(_get_activation_hook(ffn_name)))
 
+        # Run the model over the dataloader to collect MoE inputs (activations)
         for batch in tqdm(dataloader, desc=f"Running inference to collect moe inputs"):
             batch = {k: v.cuda() for k, v in batch.items()}
             if "labels" in batch:
@@ -216,15 +223,18 @@ class ExpertsGrouperForQwen3MoE(object):
                 outputs = model(**batch)
                 del outputs
         
+        # Remove hooks and clear cache
         for handle in handles:
             handle.remove()
         torch.cuda.empty_cache()
 
+        # Dynamically assign the number of groups per layer based on expert usage frequency
         if self.dynamic_group:
             num_groups_per_layer = self._assign_num_groups_per_layer(
                 num_groups, self.sparse_layer_indices
             )
 
+        # For each sparse MoE layer: compute expert outputs and cluster them
         for layer_idx in tqdm(self.sparse_layer_indices, desc="Computing similarities by expert outputs..."):
             ffn_name = f"model.layers.{layer_idx}.mlp"
             _device = model.model.layers[layer_idx].mlp.experts[0].gate_proj.weight.device
@@ -233,7 +243,6 @@ class ExpertsGrouperForQwen3MoE(object):
             with torch.no_grad():
                 for i in range(self.num_experts):
                     expert_outputs.append(model.model.layers[layer_idx].mlp.experts[i](layer_input).mean(dim=0))
-                #expert_outputs = torch.stack(expert_outputs)
                 expert_outputs = torch.stack(expert_outputs).to(torch.float32)
 
                 num_groups_in_layer = num_groups_per_layer[ffn_name] if self.dynamic_group else num_groups
@@ -260,7 +269,9 @@ class ExpertsGrouperForQwen3MoE(object):
     ):
         model.eval()
         config = model.config
+        # Iterate through the dataloader to gather routing decisions
         for batch in tqdm(dataloader, desc=f"Evaluating routing distribution"):
+            # Move batch tensors to GPU
             batch = {k: v.cuda() for k, v in batch.items()}
             if "labels" in batch:
                 # We don't need to compute loss here, so remove the labels
@@ -291,24 +302,28 @@ class ExpertsGrouperForQwen3MoE(object):
             self, model: Qwen3MoeForCausalLM, dataloader: DataLoader
     ):
         model.eval()
-        forwarded_hidden_states = {} # moe input
+        forwarded_hidden_states = {} # Dict to store MoE layer inputs
         handles = []
+        # Hook function to capture layer inputs
         def _get_activation_hook(name):
             def hook(module, input, output):
                 # forwarded_hidden_states[name].append(input[0].detach().cpu().reshape(-1, input[0].shape[-1]))
                 forwarded_hidden_states[name].append(input[0].detach().reshape(-1, input[0].shape[-1]))
             return hook
         
+        # Register hooks on all sparse layers (MLPs)
         for layer_idx in tqdm(
                 self.sparse_layer_indices,
                 desc=f"[Merging]Registering forward hook..."
         ):
             ffn_name = f"model.layers.{layer_idx}.mlp"
             forwarded_hidden_states[ffn_name] = []
+            # Save handle to later remove
             handles.append(model.model.layers[layer_idx].mlp.register_forward_hook(
                 _get_activation_hook(ffn_name))
             )
 
+        # Run the model to collect inputs via hooks
         for batch in tqdm(dataloader, desc=f"Running inference to collect moe inputs"):
             batch = {k: v.cuda() for k, v in batch.items()}
             if "labels" in batch:
@@ -355,47 +370,63 @@ def _merge_mlp_experts_by_usage_frequency_weighting(
         ffn,  # Qwen3MoeSparseMoeBlock
         group_labels: torch.LongTensor,
         usage_frequencies: torch.Tensor,
+        pruning_ratio: float
 ):
-    new_experts = torch.nn.ModuleList()
+    #new_experts = torch.nn.ModuleList()
+    new_experts = []
     new_gate_weights = []
+    group_freqs = []
 
     device = ffn.gate.weight.device
     dtype = ffn.gate.weight.dtype
 
     for label in group_labels.unique():
+        # Find experts belonging to this cluster
         expert_indices = torch.where(group_labels == label)[0]
-
-        # === Experts: frequency-weighted 평균 ===
-        gate_proj_weight_list = torch.stack(
-            [ffn.experts[idx].gate_proj.weight * usage_frequencies[idx]
-             for idx in expert_indices], dim=0
-        )
-        down_proj_weight_list = torch.stack(
-            [ffn.experts[idx].down_proj.weight * usage_frequencies[idx]
-             for idx in expert_indices], dim=0
-        )
-        up_proj_weight_list = torch.stack(
-            [ffn.experts[idx].up_proj.weight * usage_frequencies[idx]
-             for idx in expert_indices], dim=0
-        )
 
         denom = torch.sum(usage_frequencies[expert_indices]) + FP32_EPS
 
-        gate_proj_weight = torch.sum(gate_proj_weight_list, dim=0) / denom
-        down_proj_weight = torch.sum(down_proj_weight_list, dim=0) / denom
-        up_proj_weight = torch.sum(up_proj_weight_list, dim=0) / denom
+        # Initialize accumulators for weighted averaging
+        gate_proj_weight = 0
+        down_proj_weight = 0
+        up_proj_weight = 0
 
+        # Compute frequency-weighted average of expert parameters
+        for idx in expert_indices:
+            freq = usage_frequencies[idx]
+            gate_proj_weight += ffn.experts[idx].gate_proj.weight * freq
+            down_proj_weight += ffn.experts[idx].down_proj.weight * freq
+            up_proj_weight   += ffn.experts[idx].up_proj.weight * freq
+
+        gate_proj_weight /= denom
+        down_proj_weight /= denom
+        up_proj_weight   /= denom
+
+        # Create a new expert with parameters replaced by frequency-weighted averages
         merged_expert = copy.deepcopy(ffn.experts[expert_indices[0]])
         merged_expert.gate_proj.weight.copy_(gate_proj_weight.to(dtype=dtype, device=device))
         merged_expert.down_proj.weight.copy_(down_proj_weight.to(dtype=dtype, device=device))
         merged_expert.up_proj.weight.copy_(up_proj_weight.to(dtype=dtype, device=device))
-
+        
+        # Add the merged expert to the new expert list
         new_experts.append(merged_expert)
 
+        # Use the gate weight of the most frequently used expert
         rep_idx = expert_indices[torch.argmax(usage_frequencies[expert_indices])]
         rep_gate_weight = ffn.gate.weight[rep_idx].clone()
         new_gate_weights.append(rep_gate_weight)
 
+        group_freqs.append(torch.max(usage_frequencies[expert_indices]).item())
+
+    # Apply frequency-based pruning across merged experts
+    new_experts, new_gate_weights = expert_prune_by_frequency(
+        torch.nn.ModuleList(new_experts),
+        new_gate_weights,
+        group_freqs,
+        pruning_ratio=pruning_ratio
+    )
+
+    # Rebuild the gate layer to match the reduced number of experts
     ffn.experts = new_experts
 
     in_features = ffn.gate.in_features
@@ -411,40 +442,51 @@ def _merge_mlp_experts_by_usage_frequency_weighting(
 def merge_by_groups_with_usage_weighted(
         model: Qwen3MoeForCausalLM,
         grouper: ExpertsGrouperForQwen3MoE,
-        merging_layers: Optional[List[int]] = None,
+        pruning_ratio: float = 1.0,
+        merging_layers: Optional[List[int]] = None
 ) -> Qwen3MoeForCausalLM:
+    # Retrieve expert usage frequencies and group labels from the grouper
     usage_frequency_dict = grouper.usage_frequency_state_dict()
     group_labels_dict = grouper.group_state_dict()
 
+    # Iterate over all sparse MoE layers
     for layer_idx in tqdm(
             grouper.sparse_layer_indices,
             desc=f"Merging experts with usage-frequency-weighted averaging..."
     ):
+        # Skip layers not included in the merging_layers list
         if merging_layers is not None and layer_idx not in merging_layers:
             continue
         ffn_name = f"model.layers.{layer_idx}.mlp"
         group_labels = group_labels_dict[ffn_name]
         usage_frequencies = usage_frequency_dict[ffn_name]
+        
+        # Replace the MLP with a merged/pruned version using weighted averaging
         model.model.layers[layer_idx].mlp = _merge_mlp_experts_by_usage_frequency_weighting(
             ffn=model.model.layers[layer_idx].mlp,
             group_labels=group_labels,
             usage_frequencies=usage_frequencies,
+            pruning_ratio=pruning_ratio
         )
-    return model        
+    return model    
 
-def prune_experts(
-        moe: Qwen3MoeSparseMoeBlock,
-        dominant_experts: List[int],
+
+def expert_prune_by_frequency(
+    experts: torch.nn.ModuleList,
+    gate_weights: list,
+    group_freqs: list,
+    pruning_ratio: float 
 ):
-    with torch.no_grad():
-        r = len(dominant_experts)
-        dominant_experts.sort()
-        gate_new = torch.nn.Linear(in_features=moe.gate.in_features, out_features=r, bias=False, dtype=torch.bfloat16)
-        gate_new.weight.data = moe.gate.weight.data[dominant_experts]
-        moe.gate = gate_new
 
-        moe.experts = torch.nn.ModuleList(
-            [moe.experts[i] for i in dominant_experts])
-        moe.num_experts = r
-        moe.top_k = min(r, moe.top_k)
-    return moe
+    group_freqs = torch.tensor(group_freqs)
+    k = max(1, int(len(group_freqs) * pruning_ratio)) # Determine number of experts to keep (top-k)
+
+    # Select indices of top-k experts with highest usage frequency
+    keep_indices = torch.topk(group_freqs, k).indices.tolist()
+
+    # Keep only the selected experts and their corresponding gate weights by keep_indices
+    pruned_experts = [experts[i] for i in keep_indices]
+    pruned_gate_weights = [gate_weights[i] for i in keep_indices]
+
+    # Return pruned expert list and gate weights
+    return torch.nn.ModuleList(pruned_experts), pruned_gate_weights
