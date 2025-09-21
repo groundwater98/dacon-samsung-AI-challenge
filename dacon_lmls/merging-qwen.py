@@ -1,8 +1,5 @@
 import os
-import gc
-import sys
 import time
-import pickle
 from typing import Optional
 
 import logging
@@ -24,6 +21,7 @@ class Args:
         dominant: Optional[str] = "knowledge",
         similarity_base: Optional[str] = "router-logits",
         merge: Optional[str] = "freq",
+        pruning_ratio: Optional[float] = 1.0,
         mode: Optional[str] = "normal",
         n_sentences: Optional[int] = 32,
         train_batch_size: Optional[int] = 4,
@@ -49,6 +47,7 @@ class Args:
         self.dominant = dominant
         self.similarity_base = similarity_base
         self.merge = merge
+        self.pruning_ratio = pruning_ratio
         self.mode = mode
         self.n_sentences = n_sentences
         self.train_batch_size = train_batch_size
@@ -69,6 +68,7 @@ class Args:
         self.dynamic_group = dynamic_group
 
 def get_dataloader(args, tokenizer):
+    # Build a calibration dataloader using the C4 dataset
     return get_calib_dataloder(
         dataset="c4",
         tokenizer=tokenizer,
@@ -79,6 +79,7 @@ def get_dataloader(args, tokenizer):
     )
 
 def get_grouper(args, config):
+    # Initialize the ExpertsGrouperForQwen3MoE with experiment arguments
     return ExpertsGrouperForQwen3MoE(
                 config=config,
                 similarity_base=args.similarity_base,
@@ -92,6 +93,7 @@ def get_grouper(args, config):
             )
 
 def evaluation(args, model, tokenizer):
+    # Ensure the result directory exists
     result_dir = args.result_path.split("/")[:-1]
     result_dir = "/".join(result_dir)
     if not os.path.exists(result_dir):
@@ -102,6 +104,7 @@ def evaluation(args, model, tokenizer):
     #         model, tokenizer=tokenizer, batch_size=eval_batch_size, log=True
     #     )
 
+    # Run few-shot evaluation on one or multiple tasks
     if isinstance(args.task, str):
         evaluate_fewshot(
             model, tokenizer=tokenizer, task=args.task, num_fewshot=args.num_fewshot, output_path=args.result_path, log=True
@@ -125,7 +128,8 @@ def main(
         model_name: Optional[str] = "Qwen/Qwen3-30B-A3B",
         dominant: Optional[str] = "no", # random, frequency, knowledge
         similarity_base: Optional[str] = "expert-output",
-        merge: Optional[str] = "freq", 
+        merge: Optional[str] = "freq",
+        pruning_ratio: Optional[float] = 1.0,
         mode: Optional[str] = "normal", 
         n_sentences: Optional[int] = 128,
         train_batch_size: Optional[int] = 4,
@@ -154,6 +158,7 @@ def main(
         dominant=dominant,
         similarity_base=similarity_base,
         merge=merge,
+        pruning_ratio=pruning_ratio,
         mode=mode,
         n_sentences=n_sentences,
         train_batch_size=train_batch_size,
@@ -173,30 +178,32 @@ def main(
     )
     torch.manual_seed(0)
 
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-30B-A3B")
-    tokenizer.pad_token_id = tokenizer.eos_token_id
-    model = AutoModelForCausalLM.from_pretrained(
-        "Qwen/Qwen3-30B-A3B",
-        torch_dtype=torch.bfloat16, device_map="auto"
-    )
-    # local_model_path = "/home/jisoo0204/.cache/modelscope/hub/models/Qwen/Qwen3-30B-A3B"
-
-    # tokenizer = AutoTokenizer.from_pretrained(local_model_path)
+    # tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-30B-A3B")
     # tokenizer.pad_token_id = tokenizer.eos_token_id
-
     # model = AutoModelForCausalLM.from_pretrained(
-    #     local_model_path,
-    #     torch_dtype="auto",
-    #     device_map="auto"
+    #     "Qwen/Qwen3-30B-A3B",
+    #     torch_dtype=torch.bfloat16, device_map="auto"
     # )
+    local_model_path = "/home/jisoo0204/.cache/modelscope/hub/models/Qwen/Qwen3-30B-A3B"
 
+    tokenizer = AutoTokenizer.from_pretrained(local_model_path)
+    tokenizer.pad_token_id = tokenizer.eos_token_id
+
+    model = AutoModelForCausalLM.from_pretrained(
+        local_model_path,
+        torch_dtype="auto",
+        device_map="auto"
+    )
+
+    # Optionally load custom weights if model_path provided
     if model_path:
         model.load_state_dict(torch.load(model_name))
     model.eval()
+    # Prepare dataloader and grouper
     dataloader_for_merging = get_dataloader(args, tokenizer)
     grouper = get_grouper(args, model.config)
 
-    print("Number of parameters before merging:", model.num_parameters())
+    print("Number of parameters before merging and pruning:", model.num_parameters())
     print(f"Merging into average {num_average_groups} groups...")
     group_st = time.time()
     if merge == "freq" or dominant == "frequency":
@@ -207,14 +214,13 @@ def main(
     dom_experts = None
     dom_experts = grouper.cluster_experts(model=model, dataloader=dataloader_for_merging, num_groups=num_average_groups)
       
-
-    ### 3. Merging
+    ### 3. Merging and pruning
     if merge == "freq":
         model = merge_by_groups_with_usage_weighted(
-            model, grouper=grouper, merging_layers=list(range(start_layer, model.config.num_hidden_layers))
+            model, grouper=grouper, pruning_ratio=pruning_ratio, merging_layers=list(range(start_layer, model.config.num_hidden_layers))
         )
 
-    print(f"Merging time: {time.time() - group_st:.2f} seconds")
+    print(f"Merging and pruning time: {time.time() - group_st:.2f} seconds")
 
     ### 4. Grouping results
     print(f"======== Grouping results ========= ")
@@ -225,16 +231,16 @@ def main(
             print(f"Group {name}: {state.tolist()} (DOMs are {dom_experts[name]}, {len(dom_experts[name])})")
 
     del grouper
-    
+
     ### 5. Save model
-    print("Number of parameters after merging:", model.num_parameters())
-    model.config.num_experts = args.num_average_groups
+    print("Number of parameters after merging and pruning:", model.num_parameters())
+    model.config.num_experts = max(1, int(args.num_average_groups * pruning_ratio))
     model.config.architectures = ["Qwen3MoeForCausalLM"]
     model.config.model_type = "qwen3_moe"
+    model.config.num_experts_per_tok = 6
     
     if not os.path.exists(output_path):
         os.makedirs(output_path)
-    # torch.save(model.state_dict(), output_path+"/model.pth")
 
     model.save_pretrained(output_path, safe_serialization=False)
     tokenizer.save_pretrained(output_path)
