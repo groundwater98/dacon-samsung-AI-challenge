@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
+
 import torch
 
 from .constants import FP32_EPS
