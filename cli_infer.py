@@ -12,7 +12,6 @@ parser.add_argument("--max_seqs", type=int, default=128, help="Maximum number of
 args = parser.parse_args()
 
 # Load tokenizer
-# tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-30B-A3B")
 tokenizer = AutoTokenizer.from_pretrained(args.model_path)
 
 # Load vLLM model
@@ -20,7 +19,7 @@ llm = LLM(
     model=args.model_path,
     dtype="float16",
     tensor_parallel_size=args.tp_size,
-    gpu_memory_utilization=0.8,
+    gpu_memory_utilization=0.9,
     max_num_seqs=args.max_seqs
 )
 
@@ -28,7 +27,7 @@ llm = LLM(
 default_sampling = SamplingParams(
     temperature=0.8,
     top_p=0.95,
-    max_tokens=512
+    max_tokens=1024
 )
 
 print("CLI Inference (Thinking Mode ON, type 'exit' to quit)\n")
@@ -65,3 +64,4 @@ while True:
         print(generated_text.strip())
 
     print("-" * 60)
+
