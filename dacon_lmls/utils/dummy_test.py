@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
+
 import torch
 
 __all__ = ['DUMMY_INPUT_IDS', 'DUMMY_LABELS']
