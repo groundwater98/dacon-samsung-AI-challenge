@@ -237,7 +237,7 @@ def main(
     model.config.num_experts = max(1, int(args.num_average_groups * pruning_ratio))
     model.config.architectures = ["Qwen3MoeForCausalLM"]
     model.config.model_type = "qwen3_moe"
-    model.config.num_experts_per_tok = 6
+    model.config.num_experts_per_tok = 7
     
     if not os.path.exists(output_path):
         os.makedirs(output_path)
