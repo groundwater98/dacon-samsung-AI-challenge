@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
+
 """
 Functionalities for pre-processing and post-processing of GLUE datasets.
 """
