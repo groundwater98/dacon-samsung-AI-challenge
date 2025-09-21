@@ -178,22 +178,22 @@ def main(
     )
     torch.manual_seed(0)
 
-    # tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-30B-A3B")
-    # tokenizer.pad_token_id = tokenizer.eos_token_id
-    # model = AutoModelForCausalLM.from_pretrained(
-    #     "Qwen/Qwen3-30B-A3B",
-    #     torch_dtype=torch.bfloat16, device_map="auto"
-    # )
-    local_model_path = "/home/jisoo0204/.cache/modelscope/hub/models/Qwen/Qwen3-30B-A3B"
-
-    tokenizer = AutoTokenizer.from_pretrained(local_model_path)
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-30B-A3B")
     tokenizer.pad_token_id = tokenizer.eos_token_id
-
     model = AutoModelForCausalLM.from_pretrained(
-        local_model_path,
-        torch_dtype="auto",
-        device_map="auto"
+        "Qwen/Qwen3-30B-A3B",
+        torch_dtype=torch.bfloat16, device_map="auto"
     )
+    # local_model_path = "/home/jisoo0204/.cache/modelscope/hub/models/Qwen/Qwen3-30B-A3B"
+
+    # tokenizer = AutoTokenizer.from_pretrained(local_model_path)
+    # tokenizer.pad_token_id = tokenizer.eos_token_id
+
+    # model = AutoModelForCausalLM.from_pretrained(
+    #     local_model_path,
+    #     torch_dtype="auto",
+    #     device_map="auto"
+    # )
 
     # Optionally load custom weights if model_path provided
     if model_path:
