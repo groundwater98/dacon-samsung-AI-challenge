@@ -1,2 +1,4 @@
+# -*- coding: utf-8 -*-
+
 FP32_EPS = 1e-7
 BF16_EPS = 1e-3
