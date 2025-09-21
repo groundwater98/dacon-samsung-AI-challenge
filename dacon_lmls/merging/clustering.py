@@ -17,6 +17,7 @@ def group_experts_by_clustering(
     w2: float = 1.0,
     w3: float = 1.0,
 ):
+    # Ensure tensors are float for distance computations
     experts = experts.to(torch.float)
     experts2 = experts2.to(torch.float) if experts2 is not None else None
     experts3 = experts3.to(torch.float) if experts3 is not None else None
@@ -25,11 +26,13 @@ def group_experts_by_clustering(
         print(f"group: {labels}, dom: {dom_experts}")
         return dom_experts, labels
         
+    # Z-score standardization per feature, then shift to make min >= 0
     def _standardize(x):
         x = (x - x.mean(dim=0)) / (x.std(dim=0) + 1e-6)
         min_value = x.min()
         return x - min_value
 
+    # Initialize cluster centers from provided indices
     if init_center is not None:
         indices = init_center
 
@@ -40,6 +43,7 @@ def group_experts_by_clustering(
     assignments = None
     print(f"initial center: {centers.shape} {indices}")
 
+    # Feature-dimension scales for normalization across views
     s1 = experts.shape[1]
     s2 = experts2.shape[1] if experts2 is not None else 1.0
     s3 = experts3.shape[1] if experts3 is not None else 1.0
@@ -66,6 +70,8 @@ def group_experts_by_clustering(
         print(f"new_centers: {torch.sum(torch.isnan(new_centers))}, {new_centers[0]}")
         if experts2 is not None:
             print(f"new_centers2: {torch.sum(torch.isnan(new_centers2))}, {new_centers2[0]}")
+        
+        # Convergence check: track maximum absolute shift among centers
         max_diff = 0
         for i in range(num_groups):
             diff = torch.max(torch.abs(new_centers[i] - centers[i]))
@@ -81,6 +87,7 @@ def group_experts_by_clustering(
         centers2 = new_centers2 if experts2 is not None else None
         centers3 = new_centers3 if experts3 is not None else None
     
+    # After convergence: pick a representative (closest) member per group
     center_indices = []
     for k in range(num_groups):
         cluster_members = experts[assignments == k]
@@ -98,8 +105,10 @@ def group_experts_by_clustering(
     print(f"group: {assignments.cpu()}, dom: {center_indices}")
     return center_indices, assignments
 
+# Compute pairwise distances
 @torch.no_grad()
 def compute_distance(pair_distances, clusters, method='average', X=None):
+    # Average-linkage: distance between clusters is the mean of all pairwise distances
     if method == 'average':
         # dist(cluster i, cluster j) = sum_{x in cluster i, y in cluster j} dist(x, y) / (|cluster i| * |cluster j|)
         cluster_labels = torch.unique(clusters)
@@ -118,6 +127,7 @@ def compute_distance(pair_distances, clusters, method='average', X=None):
                 distances[i, j] = new_dist
                 distances[j, i] = new_dist
         distances.fill_diagonal_(float('inf'))
+        # Find the minimum entry and map flat index back to (i, j)
         idx = torch.argmin(distances)
         final_i, final_j = cluster_labels[idx // distances.shape[0]], cluster_labels[idx % distances.shape[0]]
     else:
@@ -128,10 +138,12 @@ def compute_distance(pair_distances, clusters, method='average', X=None):
 @torch.no_grad()
 def pairwise_distances(X, method='average'):
     """Compute pairwise Euclidean distances between points."""
+    # Use (xi - xj)^2 = ||xi||^2 + ||xj||^2 - 2 xi^T xj
     dot_product = torch.mm(X, X.t())
     square_norm = dot_product.diag()
     distances = square_norm.unsqueeze(0) - 2.0 * dot_product + square_norm.unsqueeze(1)
     distances = torch.clamp(distances, min=0.0).sqrt()
+    # For average-linkage, disallow self-matches by marking diagonal as +inf
     if method == 'average':
         distances.fill_diagonal_(float('inf'))
     return distances
@@ -167,6 +179,7 @@ def hierarchical_clustering(X, n_clusters, method='average'):
     
     # Perform clustering
     while len(torch.unique(clusters)) > n_clusters:
+        # Find the closest pair of clusters to merge
         i, j, distances = linkage_step(distances, pair_distances, clusters, method, X)
         print(f"clusters: {len(torch.unique(clusters))}, merge ({i}, {j})")
         cj = clusters[j]
@@ -182,6 +195,7 @@ def hierarchical_clustering(X, n_clusters, method='average'):
             element_id += 1
         clusters[i] = d[idx.item()]
     
+    # Select representative center sample for each cluster
     center_indices = []
     for k in range(n_clusters):
         cluster_members = X[clusters == k]
