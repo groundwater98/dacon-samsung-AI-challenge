@@ -13,7 +13,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --cluster="hierarchical" \
   --linkage="average" \
   --merge="freq" \
-  --pruning_ratio=0.75 \
+  --pruning_ratio=0.77 \
   --num_average_groups=96 \
   --n_sentences=64 \
   --train_batch_size=4 \
