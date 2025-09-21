@@ -44,12 +44,14 @@ def evaluate_fewshot(
         output_path: Optional[str] = None,
 ):
     # initialize_tasks(verbosity="WARNING")
+    # Wrap HuggingFace model into HFLM (lm-eval-harness compatible interface)
     lm = HFLM(
         pretrained=model,
         tokenizer=tokenizer,
         batch_size=eval_batch_size,
         device_map="auto"
     )
+    # Run evaluation with fixed random seeds for reproducibility
     results = evaluator.simple_evaluate(
         model=lm,
         tasks=task,
@@ -76,3 +78,4 @@ def evaluate_fewshot(
 
 
     return results
+
